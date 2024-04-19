@@ -6,6 +6,7 @@ import cors from "cors";
 import { MessageType, WsMessageParser } from "./types/message";
 import { GameRoom } from "./redis/connect";
 import { Game } from "./redis/game";
+import { Worker } from "./worker/publish";
 
 const app = express();
 
@@ -41,12 +42,16 @@ app.get("/_health", (_req, res) => {
     });
 });
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", (ws, _) => {
 
     //Todo: handle authentication
 
     ws.on("message", async (message) => {
         const data = WsMessageParser.parse(JSON.parse(message.toString()));
+
+        if(data.type === MessageType.GetMatch) {
+            await GameRoom.getInstance().getMatch(data.payload, ws);
+        }
 
         if(data.type === MessageType.Join) {
             await GameRoom.getInstance().subscribe(data.payload.gameId, data.payload.userId, data.payload.role, ws)
@@ -93,7 +98,14 @@ Promise.all([
         }).catch((error) => {
             reject(error);
         });
-    })
+    }),
+    new Promise((resolve, reject) => {
+        Worker.getInstance().connect().then(() => {
+            resolve(true);
+        }).catch((error) => {
+            reject(error);
+        });
+    }),
 ]).then(() => {
     server.listen(WSPORT, async () => {
         console.log(`Server listening on port: ${WSPORT}\n`);

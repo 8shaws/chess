@@ -1,8 +1,9 @@
 import { RedisClientType, createClient } from "redis";
 import { DEFAULT_FEN, REDIS_URL } from "../config";
-import { Role } from "../types/game";
+import { GameRole, WORKER_PROCESSES } from "@chess/common";
 import { MessageType, WsMessageParser } from "../types/message";
 import { Game } from "./game";
+import { Worker } from "../worker/publish";
 
 export class GameRoom {
     public static instance: GameRoom;
@@ -13,7 +14,7 @@ export class GameRoom {
     // userId: [gameid1, gameid2] -> incase for audience else only one gameid
     private subscriptions: Map<string, string[]>;
     // gameid: { user1: {userId: user1, ws: ws1, role: "black"}, user2: {userId: user2, ws: ws2, role: "white"}, audience: {userId: user3, ws: ws3, role: "audience"}}
-    private reverseSubscriptions: Map<string, { [userId: string]: { userId: string, ws: WebSocket, role: Role } }>;
+    private reverseSubscriptions: Map<string, { [userId: string]: { userId: string, ws: WebSocket, role: GameRole } }>;
 
     constructor() {
         this.subscriber = createClient({
@@ -23,7 +24,7 @@ export class GameRoom {
             url: REDIS_URL,
         });
         this.subscriptions = new Map<string, string[]>();
-        this.reverseSubscriptions = new Map<string, { [userId: string]: { userId: string, ws: any, role: Role } }>();
+        this.reverseSubscriptions = new Map<string, { [userId: string]: { userId: string, ws: any, role: GameRole } }>();
 
     }
 
@@ -40,7 +41,49 @@ export class GameRoom {
         return this.instance;
     }
 
-    async subscribe(gameId: string, userId: string, role: Role, ws: any) {
+    //todo: give payload some type
+    async getMatch(payload: any, ws: any) {
+        const exceptGames = payload.exceptGame;
+        let remainGames: string[] = [];
+        this.reverseSubscriptions.forEach((value, key) => {
+            if(!exceptGames.includes(key)) {
+                remainGames.push(key);      
+            }
+        });
+        const games = remainGames.filter((gameId) => {
+            const room = this.reverseSubscriptions.get(gameId) || {};
+            if(Object.keys(room).length >= 2) {
+                return false;
+            }
+            if(Object.keys(room).length === 1) {
+                return Object.values(room)[0]?.role !== payload.role;
+            }
+            return false;
+        });
+
+        if(games.length > 0) {
+            return ws.send(JSON.stringify({
+                type: MessageType.GetMatch,
+                payload: {
+                    type: MessageType.GetMatch,
+                    payload: {
+                        matchedGameId: games[Math.floor(Math.random() * games.length)]
+                    }
+                }
+            }));
+        }
+        return ws.send(JSON.stringify({
+            type: MessageType.GetMatch,
+            payload: {
+                type: MessageType.GetMatch,
+                payload: {
+                    matchedGameId: []
+                }
+            }
+        }));
+    }
+
+    async subscribe(gameId: string, userId: string, role: GameRole, ws: any) {
         this.subscriptions.set(userId, [
             ...(this.subscriptions.get(userId) || []),
             gameId
@@ -53,7 +96,7 @@ export class GameRoom {
             });
         }
         else if(Object.keys(this.reverseSubscriptions.get(gameId) || {}).length == 1) {
-            let role = Object.values(this.reverseSubscriptions.get(gameId) || {})[0]?.role === Role.Black ? Role.White : Role.Black;
+            let role = Object.values(this.reverseSubscriptions.get(gameId) || {})[0]?.role === GameRole.Black ? GameRole.White : GameRole.Black;
             this.reverseSubscriptions.set(gameId, {
                 ...this.reverseSubscriptions.get(gameId),
                 [userId]: { userId, ws, role }
@@ -63,11 +106,21 @@ export class GameRoom {
                 lan: "",
                 fen: DEFAULT_FEN,
             });
+
+            //publish the game to worker;
+            await Worker.getInstance().publishOne({
+                type: WORKER_PROCESSES.DB_ADD_PLAYER,
+                payload: {
+                    gameId,
+                    userId,
+                    role
+                }
+            });
         }
         else {
             this.reverseSubscriptions.set(gameId, {
                 ...this.reverseSubscriptions.get(gameId),
-                [userId]: { userId, ws, role: Role.Audience }
+                [userId]: { userId, ws, role: GameRole.Audience }
             });
         }
 
@@ -115,7 +168,7 @@ export class GameRoom {
         
         // allow publishing only if the role is black or white
         if (this.reverseSubscriptions.get(gameId)?.[userId]) {
-            if([Role.Black, Role.White].includes(this.reverseSubscriptions.get(gameId)?.[userId]?.role as Role)) {
+            if([GameRole.Black, GameRole.White].includes(this.reverseSubscriptions.get(gameId)?.[userId]?.role as GameRole)) {
 
                 //todo: check for checkmate and stalemate, update the payload accordingly
                 await Game.getInstance().move(gameId, userId, payload.from, payload.to);
